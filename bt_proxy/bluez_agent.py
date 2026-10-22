@@ -31,8 +31,11 @@ ADAPTER_INTERFACE = "org.bluez.Adapter1"
 PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 ERROR_REJECTED = "org.bluez.Error.Rejected"
 
-# Same capability HueBLE registers for its own BlueZ pairing workaround.
-AGENT_CAPABILITY = "KeyboardDisplay"
+# The agent's capability becomes the kernel's SMP IO capability. Anything with
+# input/output (e.g. KeyboardDisplay) makes the kernel request MITM protection,
+# which a display-less device like a Hue bulb answers with "Pairing not
+# supported"; NoInputNoOutput yields plain Just Works, which it accepts.
+AGENT_CAPABILITY = "NoInputNoOutput"
 
 
 class _AutoConfirmAgent(ServiceInterface):
