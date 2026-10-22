@@ -151,6 +151,7 @@ class APIConnection:
             proto.FEATURE_PASSIVE_SCAN
             | proto.FEATURE_ACTIVE_CONNECTIONS
             | proto.FEATURE_REMOTE_CACHING
+            | proto.FEATURE_PAIRING
             | proto.FEATURE_RAW_ADVERTISEMENTS
             | proto.FEATURE_STATE_AND_MODE
         )
@@ -248,15 +249,16 @@ class APIConnection:
                 self._send_connections_free()
 
         elif request_type == proto.BLE_REQUEST_PAIR:
-            # Pairing not directly supported through bleak
+            paired, error = await ble.pair_device(address)
             resp = proto.encode_ble_device_pairing_response(
-                address, False, -1
+                address, paired, error
             )
             self._send_message(proto.MSG_BLE_DEVICE_PAIRING_RESPONSE, resp)
 
         elif request_type == proto.BLE_REQUEST_UNPAIR:
+            success, error = await ble.unpair_device(address)
             resp = proto.encode_ble_device_unpairing_response(
-                address, False, -1
+                address, success, error
             )
             self._send_message(proto.MSG_BLE_DEVICE_UNPAIRING_RESPONSE, resp)
 

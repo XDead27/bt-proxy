@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from bleak import BleakClient, BleakScanner
 from bleak.assigned_numbers import AdvertisementDataType
-from bleak.exc import BleakError
+from bleak.exc import BleakDeviceNotFoundError, BleakError
 from bleak.backends.bluezdbus.version import _get_bluetoothctl_version
 
 try:  # bleak >= 2.0: typed "Bluetooth not available" exception + reason enum
@@ -44,6 +44,10 @@ MTU_ACQUIRE_TIMEOUT = 10.0
 CONNECT_TIMEOUT = 30.0
 CONNECT_RETRY_DELAY = 2.0
 CONNECT_MAX_RETRIES = 3
+
+# Pairing involves user-visible device state (e.g. a bulb that only accepts a
+# bond while in pairing mode), so give it one bounded attempt and no retries.
+PAIR_TIMEOUT = 30.0
 
 # Per-device connect-failure backoff. Home Assistant retries failed connections
 # aggressively; without a brake we relay every retry straight to BlueZ and the
@@ -215,6 +219,27 @@ class BLEConnection:
         if self.client and self.client.is_connected:
             logger.info("Disconnecting from %s", self.mac)
             await self.client.disconnect()
+
+    async def pair(self) -> None:
+        """Pair (bond) with the connected device.
+
+        BlueZ does the pairing and stores the bond on this host. No agent is
+        registered, so BlueZ uses Just Works (NoInputNoOutput) unless another
+        agent (e.g. an open bluetoothctl) is the default.
+        """
+        if not self.client or not self.client.is_connected:
+            raise RuntimeError("Not connected")
+        logger.info("Pairing with %s", self.mac)
+        await asyncio.wait_for(self.client.pair(), timeout=PAIR_TIMEOUT)
+        logger.info("Paired with %s", self.mac)
+
+    async def unpair(self) -> None:
+        """Remove the bond with the device (this also disconnects it)."""
+        if not self.client:
+            raise RuntimeError("Not connected")
+        logger.info("Unpairing %s", self.mac)
+        self._notify_handles.clear()
+        await self.client.unpair()
 
     async def get_services(self) -> list[bytes]:
         """Discover GATT services and return encoded service messages."""
@@ -843,6 +868,67 @@ class BLEManager:
         finally:
             self._connecting.discard(address)
 
+    async def pair_device(self, address: int) -> tuple[bool, int]:
+        """Pair with a connected device. Returns (paired, error_code)."""
+        mac = proto.int_to_mac(address)
+        conn = self.get_connection(address)
+        if conn is None:
+            logger.warning("Cannot pair %s: not connected", mac)
+            return False, -1
+        try:
+            await conn.pair()
+        except Exception as e:
+            logger.error(
+                f"Pairing with {mac} failed: {e!r}. If the device only accepts "
+                f"new bonds in pairing mode (e.g. Philips Hue bulbs), put it in "
+                f"pairing mode and retry."
+            )
+            return False, -1
+        return True, 0
+
+    async def unpair_device(self, address: int) -> tuple[bool, int]:
+        """Remove the BlueZ bond for a device. Returns (success, error_code).
+
+        Works whether or not the device is currently connected; unpairing a
+        connected device also disconnects it.
+        """
+        mac = proto.int_to_mac(address)
+        conn = self._connections.get(address)
+        try:
+            if conn is not None and conn.client is not None:
+                await conn.unpair()
+            else:
+                kwargs: dict[str, Any] = {}
+                if self._adapter:
+                    kwargs["adapter"] = self._adapter
+                await BleakClient(mac, **kwargs).unpair()
+        except BleakDeviceNotFoundError:
+            # BlueZ doesn't know the device, so there is no bond to remove.
+            logger.info("Unpair %s: no bond to remove", mac)
+        except Exception as e:
+            logger.error(f"Unpairing {mac} failed: {e!r}")
+            return False, -1
+        logger.info("Unpaired %s", mac)
+        # Removing the device drops the link; make sure the slot is released
+        # and the client told even if bleak's disconnect callback didn't fire.
+        if conn is not None and self._connections.get(address) is conn:
+            self._handle_disconnect(address)
+        return True, 0
+
+    async def _bluez_is_paired(self, mac: str) -> bool:
+        """Whether BlueZ holds a pairing/bond for this device."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl", "info", mac,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except Exception:
+            return False
+        info = stdout.decode(errors="replace")
+        return "Paired: yes" in info or "Bonded: yes" in info
+
     async def _bluez_clear_state(self, mac: str) -> None:
         """Disconnect a device in BlueZ to clear stale connection state."""
         try:
@@ -856,8 +942,15 @@ class BLEManager:
             pass
 
     async def _bluez_remove_device(self, mac: str) -> None:
-        """Remove a device from BlueZ to completely reset its state."""
+        """Remove a device from BlueZ to completely reset its state.
+
+        Paired devices are only disconnected: removing them would also delete
+        the bond, which can't be recreated without re-pairing the device.
+        """
         await self._bluez_clear_state(mac)
+        if await self._bluez_is_paired(mac):
+            logger.debug("Not removing %s from BlueZ: it is paired", mac)
+            return
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bluetoothctl", "remove", mac,

@@ -10,6 +10,7 @@ WARNING: This project was coded largely with the assistance of an LLM. It works 
 
 - **BLE scanning** — passive and active scan modes, raw advertisement forwarding
 - **Active connections** — GATT connect/disconnect, service discovery, read/write characteristics and descriptors, notifications
+- **Pairing** — BlueZ-backed pairing/unpairing (bonds stored on the proxy host)
 - **mDNS discovery** — automatically advertised so Home Assistant finds it
 - **ESPHome Native API** — wire-compatible with `aioesphomeapi` / Home Assistant ESPHome integration
 
@@ -158,6 +159,22 @@ sudo systemctl restart bluetooth
 
 Once enabled, the proxy logs `Starting BLE scanner (configured=passive,
 mode=passive)` and the active-fallback warning goes away.
+
+## Pairing
+
+The proxy advertises the ESPHome `PAIRING` feature, so integrations that need
+a bonded device (e.g. Philips Hue BLE bulbs via `hue_ble`) can pair through it.
+Pairing is done by BlueZ on the proxy host, and the bond lives there (check
+with `bluetoothctl paired-devices` or `bluetoothctl devices Paired`).
+
+- No pairing agent is registered, so BlueZ uses Just Works pairing. That is
+  what Hue bulbs use; devices that need a PIN or passkey are not supported.
+- Some devices only accept a new bond while in pairing mode. For Hue bulbs,
+  that means a factory-reset bulb, or one made visible/discoverable to other
+  apps from the Hue app's voice-assistant settings.
+- After upgrading, reload the proxy's ESPHome integration in Home Assistant
+  (or restart the proxy) so HA picks up the new feature flag.
+- Unpairing from Home Assistant removes the device and its bond from BlueZ.
 
 ## Reliability on Raspberry Pi
 
