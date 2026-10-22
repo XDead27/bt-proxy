@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - older bleak layout
     )
 
 from . import proto
+from .bluez_agent import pairing_agent
 
 logger = logging.getLogger(__name__)
 
@@ -223,14 +224,21 @@ class BLEConnection:
     async def pair(self) -> None:
         """Pair (bond) with the connected device.
 
-        BlueZ does the pairing and stores the bond on this host. No agent is
-        registered, so BlueZ uses Just Works (NoInputNoOutput) unless another
-        agent (e.g. an open bluetoothctl) is the default.
+        BlueZ does the pairing and stores the bond on this host. A temporary
+        agent auto-confirms Just Works pairing for this device and the adapter
+        is made Pairable meanwhile; without both, BlueZ either rejects the
+        confirmation or only offers a non-bonding pairing, which devices such
+        as Hue bulbs refuse.
         """
         if not self.client or not self.client.is_connected:
             raise RuntimeError("Not connected")
+        backend = getattr(self.client, "_backend", None)
+        device_path = getattr(backend, "_device_path", None)
+        if not device_path:
+            raise RuntimeError("No BlueZ device path for connected client")
         logger.info("Pairing with %s", self.mac)
-        await asyncio.wait_for(self.client.pair(), timeout=PAIR_TIMEOUT)
+        async with pairing_agent(device_path):
+            await asyncio.wait_for(self.client.pair(), timeout=PAIR_TIMEOUT)
         logger.info("Paired with %s", self.mac)
 
     async def unpair(self) -> None:
@@ -413,6 +421,7 @@ class BLEManager:
         self._adapter = adapter
         self._connections: dict[int, BLEConnection] = {}
         self._connecting: set[int] = set()
+        self._pair_lock = asyncio.Lock()
         # Per-device connect-failure backoff: address -> (fail_count, next_ts).
         # Throttles reconnect storms so we don't hammer a flaky controller.
         self._connect_backoff: dict[int, tuple[int, float]] = {}
@@ -876,7 +885,9 @@ class BLEManager:
             logger.warning("Cannot pair %s: not connected", mac)
             return False, -1
         try:
-            await conn.pair()
+            # One at a time: each pairing installs its own default agent.
+            async with self._pair_lock:
+                await conn.pair()
         except Exception as e:
             logger.error(
                 f"Pairing with {mac} failed: {e!r}. If the device only accepts "

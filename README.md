@@ -167,8 +167,12 @@ a bonded device (e.g. Philips Hue BLE bulbs via `hue_ble`) can pair through it.
 Pairing is done by BlueZ on the proxy host, and the bond lives there (check
 with `bluetoothctl paired-devices` or `bluetoothctl devices Paired`).
 
-- No pairing agent is registered, so BlueZ uses Just Works pairing. That is
-  what Hue bulbs use; devices that need a PIN or passkey are not supported.
+- While a pairing runs, the proxy registers a temporary BlueZ agent that
+  auto-confirms Just Works pairing for that one device, and switches the
+  adapter to Pairable (restored afterwards). Without both, BlueZ on a headless
+  host rejects the confirmation ("Numeric comparison failed") or only offers a
+  non-bonding pairing, which Hue bulbs refuse ("Pairing not supported").
+  Devices that need a PIN or passkey typed in are not supported.
 - Some devices only accept a new bond while in pairing mode. For Hue bulbs,
   that means a factory-reset bulb, or one made visible/discoverable to other
   apps from the Hue app's voice-assistant settings.
